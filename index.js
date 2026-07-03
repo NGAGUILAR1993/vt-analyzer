@@ -25,106 +25,61 @@ function formatReport(data, fileName, hash, fileSize) {
   const harm = stats.harmless || 0;
   const undet = stats.undetected || 0;
   const total = mal + sus + harm + undet;
+  
+  const names = (data.attributes?.popular_threat_classification?.popular_threat_name || [])
+    .map(t => t[0]).filter(Boolean).join(", ") || 'Desconocido';
 
-  let estado, riesgo, accion;
+  let mensaje = "";
+  let motivos = [];
+
   if (mal > 0) {
-    estado = "🚨 MALICIOSO"; riesgo = "CRÍTICO";
-    accion = "❌ NO ABRAS ESTE ARCHIVO. Eliminálo inmediatamente.";
+    mensaje = mensaje + "🔴 DOCUMENTO PELIGROSO — Riesgo ALTO\n\n";
+    motivos.push("Este archivo fue reportado como malicioso por múltiples motores antivirus.");
+    if (names && names !== 'Desconocido') {
+      motivos.push("Clasificación detectada: " + names + ".");
+    }
   } else if (sus > 0) {
-    estado = "⚠️ SOSPECHOSO"; riesgo = "MEDIO";
-    accion = "🔍 No lo abras a menos que confíes 100% en el remitente.";
+    mensaje = mensaje + "🟡 DOCUMENTO SOSPECHOSO — Riesgo MEDIO\n\n";
+    motivos.push("Algunos motores de seguridad detectaron comportamiento raro en este archivo.");
   } else {
-    estado = "✅ LIMPIO"; riesgo = "BAJO";
-    accion = "✓ No se detectaron amenazas en " + total + " motores.";
+    mensaje = mensaje + "🟢 DOCUMENTO SEGURO — Riesgo BAJO\n\n";
   }
 
-  let text = "🛡️ *ANÁLISIS VIRUSTOTAL*\n\n";
-  text += `📄 Archivo: ${fileName}\n`;
-  text += `📏 Tamaño: ${formatBytes(fileSize)}\n`;
-  text += `🔐 SHA256: \`${hash}\`\n`;
-  text += `🔍 Motores: ${total}\n`;
-  text += `🟢 Inofensivo: ${harm} | 🟡 No detectado: ${undet}\n`;
-  text += `🟠 Sospechoso: ${sus} | 🔴 Malicioso: ${mal}\n\n`;
-  text += `📊 Estado: ${estado}\n`;
-  text += `⚡ Riesgo: ${riesgo}\n\n`;
-  text += `🎯 Decisión: ${accion}\n`;
-  text += `🔗 https://www.virustotal.com/gui/file/${hash}`;
-  return text;
+  mensaje = mensaje + "Archivo analizado: " + fileName + "\n";
+  mensaje = mensaje + "Tamaño: " + formatBytes(fileSize) + "\n";
+  mensaje = mensaje + "Hash SHA256: " + hash + "\n";
+  
+  if (total > 0) {
+    mensaje = mensaje + "Motores analizados: " + total + " (" + mal + " maliciosos, " + sus + " sospechosos, " + harm + " limpios, " + undet + " sin detectar)\n";
+  } else {
+    mensaje = mensaje + "Motores analizados: Sin datos suficientes\n";
+  }
+
+  if (motivos.length > 0) {
+    mensaje = mensaje + "\n⚠️ Por qué es peligroso:\n";
+    for (var k = 0; k < motivos.length; k++) {
+      mensaje = mensaje + "• " + motivos[k] + "\n";
+    }
+    mensaje = mensaje + "• Los archivos así suelen usarse para robar datos, instalar virus o estafar.\n";
+    mensaje = mensaje + "• Si te lo enviaron por WhatsApp, email o link, es probable que sea una trampa.\n";
+  }
+
+  mensaje = mensaje + "\n🟡 Qué hacer:\n";
+  mensaje = mensaje + "• La reputación de un archivo puede cambiar; uno seguro hoy puede estar comprometido mañana.\n";
+  mensaje = mensaje + "• Si te llegó este archivo de alguien que no esperabas, no lo abras. Verificá con la persona por otro medio (llamada, otro chat).\n";
+  mensaje = mensaje + "• Si ya tocaste el archivo o lo descargaste, no ingreses datos personales y cambia tus claves rápido.\n";
+  
+  if (mal > 0) {
+    mensaje = mensaje + "• No interactúes con este archivo. Eliminalo inmediatamente.\n";
+    mensaje = mensaje + "• Si ya ingresaste datos bancarios o personales, avisá a tu banco y cambiá todas las claves.\n";
+  }
+
+  if (sus > 0) {
+    mensaje = mensaje + "• No abras el archivo a menos que confíes 100% en el remitente y esperes este documento específico.\n";
+  }
+
+  mensaje = mensaje + "\n✅ Decisión final: La herramienta revisa reportes de seguridad, pero la decisión de confiar o no es siempre tuya. Cuando dudes, no abras nada.\n";
+  mensaje = mensaje + "🔗 Ver detalle: https://www.virustotal.com/gui/file/" + hash;
+
+  return mensaje;
 }
-
-app.post('/analyze', async (req, res) => {
-  try {
-    const { base64, filename, vt_api_key } = req.body;
-    if (!base64 || !vt_api_key) {
-      return res.status(400).json({ error: "Faltan base64 o vt_api_key" });
-    }
-
-    const fileName = filename || "documento.pdf";
-    const cleanBase64 = base64.replace(/^data:[^;]+;base64,/, "").trim();
-    const fileBuffer = Buffer.from(cleanBase64, "base64");
-    const fileSize = fileBuffer.length;
-    const fileSizeMB = fileSize / (1024 * 1024);
-
-    if (fileSizeMB > 650) {
-      return res.json({ report: "🛡️ El archivo excede 650MB. No se puede analizar. No lo abras." });
-    }
-
-    const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-
-    let vtData = null;
-    try {
-      const lookup = await axios.get(`https://www.virustotal.com/api/v3/files/${hash}`, {
-        headers: { "x-apikey": vt_api_key }
-      });
-      vtData = lookup.data.data;
-    } catch (e) {
-      if (e.response?.status !== 404) console.error("Lookup error:", e.message);
-    }
-
-    if (vtData) {
-      return res.json({ report: formatReport(vtData, fileName, hash, fileSize) });
-    }
-
-    let uploadUrl = "https://www.virustotal.com/api/v3/files";
-    if (fileSizeMB > 32) {
-      const urlRes = await axios.get("https://www.virustotal.com/api/v3/files/upload_url", {
-        headers: { "x-apikey": vt_api_key }
-      });
-      uploadUrl = urlRes.data.data;
-    }
-
-    const form = new FormData();
-    form.append('file', fileBuffer, fileName);
-
-    await axios.post(uploadUrl, form, {
-      headers: { ...form.getHeaders(), "x-apikey": vt_api_key }
-    });
-
-    await sleep(15000);
-
-    const final = await axios.get(`https://www.virustotal.com/api/v3/files/${hash}`, {
-      headers: { "x-apikey": vt_api_key }
-    });
-
-    if (final.data?.data) {
-      return res.json({ report: formatReport(final.data.data, fileName, hash, fileSize) });
-    }
-
-    return res.json({
-      report: `⏳ *ANÁLISIS EN PROCESO*\n\n📄 ${fileName}\n🔐 \`${hash}\`\n\n✅ Enviado a VT. Consultá en 2 minutos:\n🔗 https://www.virustotal.com/gui/file/${hash}`
-    });
-
-  } catch (error) {
-    console.error("Error:", error.message);
-    const status = error.response?.status;
-    let msg = "Error técnico en el servidor.";
-    if (status === 413) msg = "El archivo es demasiado grande.";
-    if (status === 429) msg = "Límite de quota excedido. Esperá 1 minuto.";
-    if (status === 401) msg = "API Key de VirusTotal inválida.";
-    res.json({ report: `🚨 *Error:* ${msg}\n\n🚨 Decisión: No abras el archivo.` });
-  }
-});
-
-app.get('/health', (req, res) => res.json({ status: "ok" }));
-
-app.listen(PORT, () => console.log(`VT Analyzer en puerto ${PORT}`));
