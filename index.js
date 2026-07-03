@@ -8,6 +8,10 @@ app.use(express.json({ limit: '700mb' }));
 
 const PORT = process.env.PORT || 3000;
 
+// Caché simple en memoria: hash → { result, timestamp }
+const cache = {};
+const CACHE_TTL = 30 * 60 * 1000; // 30 minutos
+
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 function formatBytes(bytes) {
@@ -83,3 +87,92 @@ function formatReport(data, fileName, hash, fileSize) {
 
   return mensaje;
 }
+
+app.post('/analyze', async (req, res) => {
+  try {
+    const { base64, filename, vt_api_key } = req.body;
+    if (!base64 || !vt_api_key) {
+      return res.status(400).json({ error: "Faltan base64 o vt_api_key" });
+    }
+
+    const fileName = filename || "documento.pdf";
+    const cleanBase64 = base64.replace(/^data:[^;]+;base64,/, "").trim();
+    const fileBuffer = Buffer.from(cleanBase64, "base64");
+    const fileSize = fileBuffer.length;
+    const fileSizeMB = fileSize / (1024 * 1024);
+
+    if (fileSizeMB > 650) {
+      return res.json({ report: "🛡️ El archivo excede 650MB. No se puede analizar. No lo abras." });
+    }
+
+    const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+
+    // Verificar caché
+    const cached = cache[hash];
+    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+      console.log("Cache hit para hash:", hash);
+      return res.json({ report: cached.result });
+    }
+
+    // Lookup en VT
+    let vtData = null;
+    try {
+      const lookup = await axios.get(`https://www.virustotal.com/api/v3/files/${hash}`, {
+        headers: { "x-apikey": vt_api_key }
+      });
+      vtData = lookup.data.data;
+    } catch (e) {
+      if (e.response?.status !== 404) console.error("Lookup error:", e.message);
+    }
+
+    if (vtData) {
+      const report = formatReport(vtData, fileName, hash, fileSize);
+      cache[hash] = { result: report, timestamp: Date.now() };
+      return res.json({ report });
+    }
+
+    // No está en VT → Subir
+    let uploadUrl = "https://www.virustotal.com/api/v3/files";
+    if (fileSizeMB > 32) {
+      const urlRes = await axios.get("https://www.virustotal.com/api/v3/files/upload_url", {
+        headers: { "x-apikey": vt_api_key }
+      });
+      uploadUrl = urlRes.data.data;
+    }
+
+    const form = new FormData();
+    form.append('file', fileBuffer, fileName);
+
+    await axios.post(uploadUrl, form, {
+      headers: { ...form.getHeaders(), "x-apikey": vt_api_key }
+    });
+
+    await sleep(15000);
+
+    const final = await axios.get(`https://www.virustotal.com/api/v3/files/${hash}`, {
+      headers: { "x-apikey": vt_api_key }
+    });
+
+    if (final.data?.data) {
+      const report = formatReport(final.data.data, fileName, hash, fileSize);
+      cache[hash] = { result: report, timestamp: Date.now() };
+      return res.json({ report });
+    }
+
+    const pendingReport = `⏳ *ANÁLISIS EN PROCESO*\n\n📄 ${fileName}\n🔐 \`${hash}\`\n\n✅ Enviado a VT. Consultá en 2 minutos:\n🔗 https://www.virustotal.com/gui/file/${hash}`;
+    return res.json({ report: pendingReport });
+
+  } catch (error) {
+    console.error("Error:", error.message);
+    const status = error.response?.status;
+    let msg = "Error técnico en el servidor.";
+    if (status === 413) msg = "El archivo es demasiado grande.";
+    if (status === 429) msg = "Límite de quota excedido en VirusTotal. Esperá 1 minuto.";
+    if (status === 401) msg = "API Key de VirusTotal inválida.";
+    res.json({ report: `🚨 *Error:* ${msg}\n\n🚨 Decisión: No abras el archivo.` });
+  }
+});
+
+app.get('/health', (req, res) => res.json({ status: "ok" }));
+
+app.listen(PORT, () => console.log(`VT Analyzer en puerto ${PORT}`));
