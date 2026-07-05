@@ -5,7 +5,10 @@ const crypto = require('crypto');
 
 const app = express();
 app.use(express.json({ limit: '700mb' }));
-
+app.use((req, res, next) => {
+  console.log(`📥 ${req.method} ${req.path} - ${new Date().toISOString()}`);
+  next();
+});
 const PORT = process.env.PORT || 3000;
 
 // Caché simple en memoria: hash → { result, timestamp }
